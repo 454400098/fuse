@@ -22,7 +22,7 @@ void disk_open(const char* diskfile_path)
 	return;
     }
     
-    diskfile = open(diskfile_path, O_CREAT|O_RDWR, S_IRUSR|S_IWUSR);
+    diskfile = open(diskfile_path, O_CREAT|O_RDWR, S_IRUSR|S_IWUSR);       //IWUSR user has write permission, IRUSR user has read permission, O_CREATE: If pathname does not exist, create it as a regular file,O_RDWR read write open is ok
     if (diskfile < 0) {
 	perror("disk_open failed");
 	exit(EXIT_FAILURE);
