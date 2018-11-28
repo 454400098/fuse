@@ -105,7 +105,7 @@ void *sfs_init(struct fuse_conn_info *conn)
     int ret;
     struct superblock sb;
     struct inode ino;
-;//////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////
     memset(buffer, 0, BLOCK_SIZE);
     disk_open(SFS_DATA->diskfile);
     
@@ -215,7 +215,7 @@ int sfs_getattr(const char *path, struct stat *statbuf)
             block_read(root_ino.i_addresses[i], buffer);
             memcpy((void *)&data[BLOCK_SIZE*i], (void *)buffer, BLOCK_SIZE);
         }
-
+        // find this file in current directory
         nentries = root_ino.i_size/sizeof(struct dirent);       //i_size is file size by byte   nentries is number of entries
 
         entry = (struct dirent *) data;                         //pointer to data
@@ -244,7 +244,7 @@ int sfs_getattr(const char *path, struct stat *statbuf)
             statbuf->st_mode = S_IFREG | S_IRWXU | S_IRWXG;
         }
         free(data);
-    }
+    } 
     /*---------------------------------------------------------*/
     return retstat;
 }
@@ -463,9 +463,76 @@ int sfs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse
 {
     int retstat = 0;
     log_msg("\nsfs_read(path=\"%s\", buf=0x%08x, size=%d, offset=%lld, fi=0x%08x)\n",
-	    path, buf, size, offset, fi);
+            path, buf, size, offset, fi);
 
-   
+/*-------------------------------------------------------*/
+
+    char buffer[BLOCK_SIZE];
+    char *data, *inodes_data;
+    struct dirent *entry;
+    struct superblock sb;
+    struct inode root_ino, ino;
+    int nentries, i, j, num, off;
+
+    // read superblock and root directory inode
+    memset(buffer, 0, BLOCK_SIZE);
+    block_read(0, buffer);
+    memcpy((void *)&sb, (void *)buffer, sizeof(struct superblock));
+    memset(buffer, 0, BLOCK_SIZE);
+    block_read(sb.s_ino_start, buffer);
+    memcpy((void *)&root_ino, (void *)buffer, sizeof(struct inode));
+
+    // read all data of root directory
+    data = malloc(BLOCK_SIZE * root_ino.i_blocks);
+
+    for (i=0; i != root_ino.i_blocks; ++i) {
+        memset(buffer, 0, BLOCK_SIZE);
+        block_read(root_ino.i_addresses[i], buffer);
+        memcpy((void *)&data[BLOCK_SIZE*i], (void *)buffer, BLOCK_SIZE);
+    }
+
+    // find the corresponding inode
+    nentries = root_ino.i_size/sizeof(struct dirent);
+    entry = (struct dirent *) data;
+    for (i=0; i != nentries; ++i) {
+        if (strcmp(&path[1], entry[i].d_name) == 0) {
+            break;
+        }
+    }
+
+    // if this file exists, read it.
+    if (i != nentries) {
+        // read the data from the file
+        memset(buffer, 0, BLOCK_SIZE);
+        block_read(sb.s_ino_start+(u32)(entry[i].d_ino/INODE_NUM_PER_BLK), buffer);
+        memcpy((void *)&ino, (void *)&((struct inode *)buffer)[entry[i].d_ino%INODE_NUM_PER_BLK], sizeof(struct inode));
+
+        // size <= file actual size
+        if (size <= ino.i_size) {
+            num = (u32)(size/BLOCK_SIZE);
+            for (j=0; j!= num; ++j) {
+                block_read(ino.i_addresses[j], buffer);
+                memcpy((void *)&buf[BLOCK_SIZE*j], buffer, BLOCK_SIZE);
+            }
+            retstat = size;
+        }
+        else {
+            off = ino.i_size % BLOCK_SIZE;
+            num = ino.i_size / BLOCK_SIZE;
+            for (j=0; j!=num; ++j) {
+                block_read(ino.i_addresses[j], buffer);
+                memcpy((void *)&buf[BLOCK_SIZE*j], buffer, BLOCK_SIZE);
+            }
+            if (off != 0) {
+                block_read(ino.i_addresses[j], buffer);
+                memcpy((void *)&buf[BLOCK_SIZE*j], buffer, off);
+            }
+            retstat = ino.i_size;
+        }
+    }
+
+    free(data);
+/*-------------------------------------------------------*/
     return retstat;
 }
 
@@ -478,15 +545,119 @@ int sfs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse
  * Changed in version 2.2
  */
 int sfs_write(const char *path, const char *buf, size_t size, off_t offset,
-	     struct fuse_file_info *fi)
+              struct fuse_file_info *fi)
 {
     int retstat = 0;
     log_msg("\nsfs_write(path=\"%s\", buf=0x%08x, size=%d, offset=%lld, fi=0x%08x)\n",
-	    path, buf, size, offset, fi);
-    
-    
+            path, buf, size, offset, fi);
+
+/*-------------------------------------------------------*/
+
+    char buffer[BLOCK_SIZE];
+    char *data, *inodes_data;
+    struct dirent *entry;
+    struct superblock sb;
+    struct inode root_ino, ino;
+    int nentries, i, j, k, m, num, off, block_index;
+    u8 *byte;
+    // read superblock and root directory inode
+    memset(buffer, 0, BLOCK_SIZE);
+    block_read(0, buffer);
+    memcpy((void *)&sb, (void *)buffer, sizeof(struct superblock));
+    memset(buffer, 0, BLOCK_SIZE);
+    block_read(sb.s_ino_start, buffer);
+    memcpy((void *)&root_ino, (void *)buffer, sizeof(struct inode));
+
+    // read all data of root directory
+    data = malloc(BLOCK_SIZE * root_ino.i_blocks);
+
+    for (i=0; i != root_ino.i_blocks; ++i) {
+        memset(buffer, 0, BLOCK_SIZE);
+        block_read(root_ino.i_addresses[i], buffer);
+        memcpy((void *)&data[BLOCK_SIZE*i], (void *)buffer, BLOCK_SIZE);
+    }
+
+    // find the corresponding inode
+    nentries = root_ino.i_size/sizeof(struct dirent);
+    entry = (struct dirent *) data;
+    for (i=0; i != nentries; ++i) {
+        if (strcmp(&path[1], entry[i].d_name) == 0) {
+            break;
+        }
+    }
+
+    // if this file exists, write it.
+    if (i != nentries) {
+        // get the ino structure
+        memset(buffer, 0, BLOCK_SIZE);
+        block_read(sb.s_ino_start+(u32)((entry[i].d_ino)/INODE_NUM_PER_BLK), buffer);
+        memcpy((void *)&ino, (void *)&((struct inode *)buffer)[entry[i].d_ino%INODE_NUM_PER_BLK], sizeof(struct inode));
+        // fill the last using blocks
+        off = ino.i_blocks*BLOCK_SIZE-ino.i_size;
+        if (off != 0) {
+            memcpy(&buffer, &data[BLOCK_SIZE*(ino.i_blocks-1)], BLOCK_SIZE);
+            memcpy(&buffer[BLOCK_SIZE-off], buf, off);
+            block_write(ino.i_addresses[ino.i_blocks-1], buffer);
+        }
+
+        // how many new blocks we need
+        num = (u32) ((size-off) / BLOCK_SIZE);
+        num += ((size-off)%BLOCK_SIZE==0 ? 0 : 1);
+        // create num new blocks
+        for (j=0; j!=num; ++j) {
+            // find a free data block
+            memset(buffer, 0, BLOCK_SIZE);
+            block_read(sb.s_bitmap_start, buffer);
+            block_index = sb.s_data_start;
+            for (k=0; k!=BLOCK_SIZE; ++k) {
+                byte = (u8 *) &buffer[k];
+                for (m=0; m!=8;++m) {
+                    if ( ((*byte >> m) & 1) == 0 ) {
+                        *byte |= 1 << m;
+                        break;
+                    }
+                    block_index++;
+                }
+                if (m != 8) break;
+            }
+            ino.i_addresses[ino.i_blocks] = block_index;
+            block_write(sb.s_bitmap_start, buffer);
+
+            // write a block of data
+            if (j != num-1) {
+                block_write(ino.i_addresses[ino.i_blocks], &buf[off]);
+                off += BLOCK_SIZE;
+            }
+            else {
+                memset(buffer, 0, BLOCK_SIZE);
+                memcpy(buffer, &buf[off], size-off);
+                block_write(ino.i_addresses[ino.i_blocks], buffer);
+                off = size;
+            }
+
+            ino.i_blocks++;
+            sb.s_ino_blocks++;
+        }
+
+        ino.i_size += size;
+
+        // update ino and superblock
+
+        memset(buffer, 0, BLOCK_SIZE);
+        block_read(sb.s_ino_start+(u32)(entry[i].d_ino/INODE_NUM_PER_BLK), buffer);
+        memcpy((void *)&((struct inode *)buffer)[entry[i].d_ino%INODE_NUM_PER_BLK], (void *)&ino, sizeof(struct inode));
+        block_write(sb.s_ino_start+(u32)(entry[i].d_ino/INODE_NUM_PER_BLK), buffer);
+        memset(buffer, 0, BLOCK_SIZE);
+        memcpy((void *)buffer, (void *)&sb, sizeof(struct superblock));
+        block_write(0, buffer);
+    }
+    free(data);
+
+/*-------------------------------------------------------*/
+
     return retstat;
 }
+
 
 
 /** Create a directory */
@@ -552,11 +723,57 @@ int sfs_opendir(const char *path, struct fuse_file_info *fi)
  * Introduced in version 2.3
  */
 int sfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset,
-	       struct fuse_file_info *fi)
+                struct fuse_file_info *fi)
 {
     int retstat = 0;
-    
-    
+
+
+/*---------------------------------------------------------*/
+    struct superblock sb;
+    struct inode ino;
+    struct dirent *entry;
+    char buffer[BLOCK_SIZE], *data;
+    int nentries, i;
+
+    log_msg("\nreaddir begins\n");
+    // Read the superblock
+    memset(buffer, 0, BLOCK_SIZE);
+    block_read(0, buffer);
+    memcpy((void *)&sb, (void *)buffer, sizeof(struct superblock));
+
+    // Read the first inode, containing root directory
+    block_read(sb.s_ino_start, buffer);
+    memcpy((void *)&ino, (void *)buffer, sizeof(struct inode));
+
+    // Get the dirent
+    data = malloc(ino.i_blocks * BLOCK_SIZE);
+    memset(data, 0, ino.i_blocks * BLOCK_SIZE);
+    for (i = 0; i < ino.i_blocks; i++) {
+        block_read(ino.i_addresses[i], buffer);
+        memcpy((void *)&data[BLOCK_SIZE*i], (void *)buffer, BLOCK_SIZE);
+    }
+
+    nentries = ino.i_size / sizeof(struct dirent);
+    entry = (struct dirent *) data;
+
+    //1. Find the first directory entry following the given offset (see below).
+    // Offset ignored (implementation 1)
+
+    for (i = 0; i < nentries; i++) {
+        //2. Optionally, create a struct stat that describes the file as for getattr (but FUSE only looks at st_ino and the file-type bits of st_mode).
+        //sfs_getattr(entry_arr[i].d_name, statbuf);
+
+        //3. Call the filler function with arguments of buf, the null-terminated filename, the address of your struct stat (or NULL if you have none), and the offset of the next directory entry.
+        //4. If filler returns nonzero, or if there are no more files, return 0.
+        if (filler(buf, entry[i].d_name, NULL, 0) != 0 || i + 1 == nentries) {
+            break;
+        }
+        //5. Find the next file in the directory.
+        //6. Go back to step 2.
+    }
+
+    free(data);
+/*---------------------------------------------------------*/
     return retstat;
 }
 
